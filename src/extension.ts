@@ -11,6 +11,7 @@ import * as ts from 'typescript';
 import * as crypto from 'crypto';
 import * as os from 'os';
 import { Fingerprint, WinnowingMode } from 'scanoss';
+import { analyzeScanReport } from './llmservice';
 
 const SKIP_KEYS = new Set(['loc', 'start', 'end', 'range', 'extra', 'leadingComments', 'trailingComments', 'innerComments']);
 const UNWRAP_TYPES = new Set(['ParenthesizedExpression', 'TSAsExpression', 'TSTypeAssertion', 'TSNonNullExpression']);
@@ -101,23 +102,26 @@ function formatScanossHit(h: ScanossHit): string {
 	].filter(Boolean).join(' | ');
 }//格式化SCANOSS比对结果为可读字符串
 
-async function scanossCompare(filePath: string, wfp: string): Promise<void> {
+async function scanossCompare(filePath: string, wfp: string): Promise<ScanossHit[]> {
 	try {
 		const form = new FormData();
 		form.append('file', new Blob([wfp], { type: 'text/plain' }), 'scan.wfp');
 		const res = await fetch(SCANOSS_API, { method: 'POST', body: form });
 		const data = (await res.json()) as Record<string, ScanossHit[]>;
-		const hits = Object.values(data).flat().filter((r) => r.id && r.id !== 'none');
-		if (!hits.length) {
-			console.log(`SCANOSS for ${filePath}: no KB match`);
-			return;
-		}
-		console.log(`SCANOSS for ${filePath}: ${hits.length} match(es)`);
-		hits.forEach((h, i) => console.log(`  ${i + 1}. ${formatScanossHit(h)}`));//输出SCANOSS比对结果
+		return Object.values(data).flat().filter((r) => r.id && r.id !== 'none');
 	} catch (error) {
 		console.error(`SCANOSS failed for ${filePath}:`, error);
+		return [];
 	}
 }//WFP 与 SCANOSS 开源知识库比对
+function buildScanossReport(filePath: string, hits: ScanossHit[]): string {
+	if (hits.length === 0) {
+		return `No matches found for ${filePath}. No risk of license violation.`;
+	}
+	const lines = hits.map((h, i) => `${i + 1}. ${formatScanossHit(h)}`).join('\n');
+	return `File: ${filePath}\n${hits.length} match(es):\n${lines}\n`;
+}
+//构建SCANOSS比对报告
 
 // This method is called when your extension is activated
 // Your extension is activated the very first time the command is executed
@@ -127,10 +131,13 @@ export function activate(context: vscode.ExtensionContext) {
 	// This line of code will only be executed once when your extension is activated
 	console.log('Congratulations, your extension "IPguard" is now active!');
 
+	const output = vscode.window.createOutputChannel('IPguard');//创建标签页显示LLM返回的信息
+
 	// The command has been defined in the package.json file
 	// Now provide the implementation of the command with registerCommand
 	// The commandId parameter must match the command field in package.json
 	const disposable = vscode.commands.registerCommand('call.IPguard', async () => {
+		const report: string[] = [];
 		const workspaceFolders = vscode.workspace.workspaceFolders;
 		if (!workspaceFolders) {
 			vscode.window.showErrorMessage('Please open a workspace folder.');
@@ -166,7 +173,8 @@ export function activate(context: vscode.ExtensionContext) {
 				//console.log(`Fingerprint for file ${filePath}:`, fingerprint);//测试信息
 				const wfp = await sourceToWfp(filePath, code);//生成 Winnowing指纹
 				//console.log(`WFP for ${filePath} has been generated.`);//测试信息
-				await scanossCompare(filePath, wfp);//进行大量在线比对
+				const hits= await scanossCompare(filePath, wfp);//进行大量在线比对
+				report.push(buildScanossReport(filePath, hits));
 				//生成标准化的抽象语法树与指纹。
 			}catch (error) {
 				console.error(`Error parsing file ${filePath}:`, error);
@@ -197,16 +205,35 @@ export function activate(context: vscode.ExtensionContext) {
 					//console.log(`Fingerprint for file ${fileUri.fsPath}:`, astFingerprint(py.ast));//测试信息
 					const wfp = await sourceToWfp(fileUri.fsPath, code);//生成 Winnowing指纹
 					//console.log(`WFP for ${fileUri.fsPath} has been generated.`);//测试信息
-					await scanossCompare(fileUri.fsPath, wfp);//进行大量在线比对
+					const hits = await scanossCompare(fileUri.fsPath, wfp);//进行大量在线比对
+					report.push(buildScanossReport(fileUri.fsPath, hits));
 				} else console.error(`Python normalize failed for ${fileUri.fsPath}:`, py.error);//测试信息
 			}catch (error) {
 				console.error(`Error parsing file ${fileUri.fsPath}:`, error);
 			}//解析py文件时，如果发生错误则输出错误信息
 		}
-		//编辑区
-		// The code you place here will be executed every time your command is executed
-		// Display a message box to the user
-		vscode.window.showInformationMessage('calling IPguard');
+		const finalReport = report.join('\n\n');
+		try {
+			const cfg = vscode.workspace.getConfiguration('ipguard');//获取配置
+			const result = await analyzeScanReport(finalReport, {
+				model: cfg.get<string>('model', 'deepseek-chat')!,
+				provider: 'deepseek',
+				proxyBaseUrl: cfg.get<string>('proxyUrl', 'http://121.196.228.134:3004')!,
+				temperature: 0.1,
+				maxTokens: 4096,
+			});//调用LLMservice，获取LLM的回馈
+			output.clear();//清空内容
+			output.appendLine(result.content);//写入llm的回馈
+			output.show();//显示标签页
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			vscode.window.showErrorMessage(`IPguard: ${message}`);//错误信息
+		}
+   		//编辑区，调用llmservice.ts中的deliverScanReport函数，将SCANOSS报告传递给LLM服务
+        // The code you place here will be executed every time your command is executed
+        // Display a message box to the user
+        vscode.window.showInformationMessage('calling IPguard');		
+
 	});
 	context.subscriptions.push(disposable);
 

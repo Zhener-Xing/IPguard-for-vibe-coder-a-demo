@@ -17,7 +17,22 @@
         "command": "call.IPguard",
         "title": "IPguard"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "IPguard",
+      "properties": {
+        "ipguard.proxyUrl": {
+          "type": "string",
+          "default": "http://121.196.228.134:3004",
+          "description": "Base URL of the IPguard LLM proxy (connect.js), without trailing slash."
+        },
+        "ipguard.model": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "description": "Model name sent to /v1/chat/completions."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:prepublish": "npm run compile",
@@ -25,10 +40,15 @@
     "watch": "tsc -watch -p ./",
     "pretest": "npm run compile && npm run lint",
     "lint": "eslint src",
-    "test": "vscode-test"
+    "test": "vscode-test",
+    "proxy": "node src/connect.js"
   },
   "dependencies": {
     "@babel/parser": "^7.27.0",
+    "axios": "^1.9.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.1.0",
     "scanoss": "^0.40.0"
   },
   "devDependencies": {
